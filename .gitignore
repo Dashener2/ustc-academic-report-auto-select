@@ -1,0 +1,23 @@
+# ---- 凭据：绝对不能入库 ----
+cookie.txt
+config.json
+.chrome-profile/
+*.bak
+
+# ---- 运行时产物 ----
+state.json
+monitor.log
+setup-login.log
+*.log
+
+# ---- 依赖与缓存 ----
+node_modules/
+.npm-cache/
+
+# ---- 本地调试 ----
+dev/
+
+# ---- 系统 ----
+Thumbs.db
+.DS_Store
+desktop.ini

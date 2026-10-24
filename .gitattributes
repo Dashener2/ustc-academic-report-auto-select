@@ -1,0 +1,8 @@
+# 统一换行：仓库内用 LF，Windows 批处理检出为 CRLF
+* text=auto
+
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.js   text eol=lf
+*.json text eol=lf
+*.md   text eol=lf

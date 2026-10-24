@@ -1,0 +1,30 @@
+{
+  "name": "ustc-academic-report-auto-select",
+  "version": "1.0.0",
+  "description": "中科大学术报告自动选课：监控研究生综合服务平台的学术报告，自动选课并推送通知",
+  "main": "monitor.js",
+  "scripts": {
+    "monitor": "node monitor.js",
+    "once": "node monitor.js --once",
+    "list": "node submit.js list",
+    "mine": "node submit.js mine",
+    "login": "node browser-session.js",
+    "test": "node monitor.js --test",
+    "test:wechat": "node monitor.js --test-wechat"
+  },
+  "keywords": [
+    "ustc",
+    "学术报告",
+    "自动选课",
+    "puppeteer",
+    "automation"
+  ],
+  "author": "Dashener2",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "puppeteer-core": "^25.15.0"
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "_说明": "这是配置模板。首次运行 monitor.js 时会自动复制成 config.json。白名单院系的键是系统院系代码(YXDM)，值是显示名称。",
+  "cookieFile": "cookie.txt",
+  "pageSize": 200,
+  "pollIntervalMinutes": 5,
+  "requireFutureDeadline": true,
+  "requireSelectable": true,
+  "_minRemainingSeats说明": "1 = 只在还有余位(已选<计划名额)时才算可选；0 = 已满也通知",
+  "minRemainingSeats": 1,
+  "silentFirstRun": false,
+  "_autoSelect说明": "true = 发现符合条件的新报告就自动提交选课；false = 只通知。autoSelectKeywords 为空表示全部自动选，填了则只有标题包含关键词的才自动选，其余仅通知。",
+  "autoSelect": true,
+  "autoSelectKeywords": [],
+  "departments": {
+    "210": "信息科学技术学院",
+    "006": "电子工程与信息科学系",
+    "010": "自动化系",
+    "011": "计算机科学与技术学院",
+    "229": "人工智能与数据科学学院",
+    "221": "网络空间安全学院",
+    "219": "微电子学院",
+    "225": "软件学院"
+  },
+  "notify": {
+    "sound": true,
+    "popup": true,
+    "openPage": true,
+    "_wechat说明": "type 可选 serverchan(Server酱) / pushplus(PushPlus) / wecom(企业微信群机器人)。key 填对应 SendKey / token / webhook 地址。留空则不推微信。",
+    "wechat": {
+      "type": "",
+      "key": ""
+    },
+    "wechatWebhook": ""
+  }
+}
