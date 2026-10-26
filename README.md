@@ -160,6 +160,7 @@ ustc-monitor/
 ├── state.json            # 已通知记录（已被忽略）
 ├── start-monitor.bat     # 启动监控
 ├── setup-login.bat       # 登录 / 续期
+├── reset-login.bat       # 登录态重置（重定向死循环时用）
 └── test-notify.bat       # 测试通知
 ```
 
@@ -192,6 +193,14 @@ ustc-monitor/
 
 **Q：担心自动选到不想要的报告？**
 把 `autoSelect` 设为 `false` 只观察，或给 `autoSelectKeywords` 填关键词。选错了用 `node submit.js cancel <序号>` 退掉。
+
+**Q：浏览器报 `ERR_TOO_MANY_REDIRECTS`（重定向次数过多）？**
+
+失效但服务器仍认得的旧 Cookie 会让模块页和登录页互相弹来弹去。双击 `reset-login.bat`，它会删掉 `.chrome-profile` 并重新走一次登录。
+
+**Q：为什么过几天就要重新登录？**
+
+学校会话有服务器端的绝对有效期（实测约 5 天），本地怎么续期都绕不过。到期后监控会弹窗并推微信提醒，双击 `setup-login.bat` 花 30 秒重登即可。
 
 **Q：Cookie 一直失效？**
 删掉 `.chrome-profile` 目录，重新跑 `setup-login.bat` 完整登录一次。

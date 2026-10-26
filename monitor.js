@@ -53,6 +53,9 @@ const REFERER = PAGE_URL.replace('#/xsbgxk', '');
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36';
 
+// 构建标识：改动代码后就更新它，方便从日志判断运行的到底是哪个版本
+const BUILD = 'v1.2.0 / 2026-10-26 / 失效提醒节流 + 恢复节流 + 微信告警';
+
 // ---------- 日志 ----------
 function log(msg) {
   const line = `[${new Date().toLocaleString('zh-CN')}] ${msg}`;
@@ -186,8 +189,14 @@ function submitOne(bgbm) {
 
 // ---------- 微信推送（多 provider） ----------
 function postBody(url, bodyStr, ctype, label) {
-  try {
-    const u = url instanceof URL ? url : new URL(url);
+  return new Promise((resolve) => {
+    let u;
+    try {
+      u = url instanceof URL ? url : new URL(url);
+    } catch (e) {
+      log(`[${label}] 配置有误: ${e.message}`);
+      return resolve({ ok: false, msg: e.message });
+    }
     const isHttps = u.protocol === 'https:';
     const mod = isHttps ? require('https') : require('http');
     const req = mod.request(
@@ -207,37 +216,51 @@ function postBody(url, bodyStr, ctype, label) {
         res.on('data', (x) => c.push(x));
         res.on('end', () => {
           const t = Buffer.concat(c).toString('utf8');
+          const ok =
+            res.statusCode >= 200 &&
+            res.statusCode < 300 &&
+            /"code":\s*0|"errno":\s*0|"errcode":\s*0/.test(t);
           log(`[${label}] 推送响应 HTTP ${res.statusCode}: ${t.slice(0, 200)}`);
+          resolve({ ok, status: res.statusCode, body: t });
         });
       }
     );
-    req.setTimeout(20000, () => req.destroy(new Error('timeout')));
-    req.on('error', (e) => log(`[${label}] 推送失败: ${e.message}`));
+    req.setTimeout(20000, () => req.destroy(new Error('timeout 20s')));
+    req.on('error', (e) => {
+      log(`[${label}] 推送失败: ${e.message}`);
+      resolve({ ok: false, msg: e.message });
+    });
     req.write(bodyStr);
     req.end();
-  } catch (e) {
-    log(`[${label}] 配置有误: ${e.message}`);
-  }
+  });
 }
 
-function sendWechat(text) {
+async function sendWechat(text, attempt = 1) {
   const n = config.notify || {};
   const w = n.wechat || {};
-
-  // 兼容旧的 wechatWebhook（企业微信群机器人）
-  if ((!w.type || !w.key) && n.wechatWebhook) {
-    postBody(n.wechatWebhook, JSON.stringify({ msgtype: 'text', text: { content: text } }), 'application/json', '企业微信');
-    return;
-  }
-  if (!w.type || !w.key) return;
-
   const title = 'USTC 学术报告：有新的可选！';
-  if (w.type === 'wecom') {
-    postBody(w.key, JSON.stringify({ msgtype: 'text', text: { content: text } }), 'application/json', '企业微信');
+
+  let res = null;
+  if ((!w.type || !w.key) && n.wechatWebhook) {
+    res = await postBody(
+      n.wechatWebhook,
+      JSON.stringify({ msgtype: 'text', text: { content: text } }),
+      'application/json',
+      '企业微信'
+    );
+  } else if (!w.type || !w.key) {
+    return { ok: false, msg: '未配置微信推送' };
+  } else if (w.type === 'wecom') {
+    res = await postBody(
+      w.key,
+      JSON.stringify({ msgtype: 'text', text: { content: text } }),
+      'application/json',
+      '企业微信'
+    );
   } else if (w.type === 'serverchan') {
     const body =
       'title=' + encodeURIComponent(title) + '&desp=' + encodeURIComponent(text.replace(/\n/g, '\n\n'));
-    postBody(`https://sctapi.ftqq.com/${w.key}.send`, body, 'application/x-www-form-urlencoded', 'Server酱');
+    res = await postBody(`https://sctapi.ftqq.com/${w.key}.send`, body, 'application/x-www-form-urlencoded', 'Server酱');
   } else if (w.type === 'pushplus') {
     const body = JSON.stringify({
       token: w.key,
@@ -245,14 +268,22 @@ function sendWechat(text) {
       content: text.replace(/\n/g, '<br>'),
       template: 'html',
     });
-    postBody('https://www.pushplus.plus/send', body, 'application/json', 'PushPlus');
+    res = await postBody('https://www.pushplus.plus/send', body, 'application/json', 'PushPlus');
   } else {
     log(`[微信] 未知的 type: ${w.type}（可选 serverchan / pushplus / wecom）`);
+    return { ok: false, msg: '未知 type' };
   }
+
+  if (res && !res.ok && attempt < 2) {
+    log(`[微信] 第 ${attempt} 次推送未成功，2 秒后重试一次`);
+    await new Promise((r) => setTimeout(r, 2000));
+    return sendWechat(text, attempt + 1);
+  }
+  return res || { ok: false };
 }
 
 // ---------- 通知 ----------
-function notify(items, submitResults) {
+async function notify(items, submitResults) {
   const n = config.notify || {};
   const results = submitResults || {};
   const lines = items.map((r) => {
@@ -294,13 +325,29 @@ function notify(items, submitResults) {
       spawn('cmd', ['/c', 'start', '', PAGE_URL], { detached: true, stdio: 'ignore' }).unref();
     } catch (_) {}
   }
-  sendWechat(text);
+  const wr = await sendWechat(text);
+  if (wr && wr.ok) log('[微信] 推送成功 ✅');
+  else log(`[微信] 推送未成功：${(wr && (wr.msg || wr.status)) || '未知原因'}`);
 }
 
-// ---------- 登录态失效提醒 ----------
-function notifySessionLost() {
+// ---------- 登录态失效提醒（带节流，避免每轮都弹窗轰炸） ----------
+const SESSION_NOTIFY_INTERVAL = 2 * 3600 * 1000; // 2 小时内只提醒一次
+const RECOVER_INTERVAL = 15 * 60 * 1000; // 自动恢复最多 15 分钟试一次
+let lastSessionNotifyAt = 0;
+let lastRecoverAt = 0;
+
+async function notifySessionLost() {
   const n = config.notify || {};
-  const text = '登录态已失效，监控暂停。\n\n请双击 setup-login.bat 重新登录一次\n（在弹出窗口里登录，不用再复制 Cookie）';
+  const text =
+    '登录态已失效，监控已停止选课。\n\n请回到电脑，双击 setup-login.bat 重新登录一次\n（在弹出的 Chrome 窗口里登录，不用复制 Cookie）';
+
+  const throttled = Date.now() - lastSessionNotifyAt < SESSION_NOTIFY_INTERVAL;
+  if (throttled) {
+    log('[提醒] 2 小时内已提醒过登录失效，本轮不再弹窗/推送');
+    return;
+  }
+  lastSessionNotifyAt = Date.now();
+
   if (n.sound) {
     try {
       spawn('powershell', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command',
@@ -316,6 +363,10 @@ function notifySessionLost() {
         { detached: true, stdio: 'ignore' }).unref();
     } catch (_) {}
   }
+  // 同时推微信，人不在电脑前也能知道
+  const wr = await sendWechat(text);
+  if (wr && wr.ok) log('[微信] 登录失效提醒已推送 ✅');
+  else log('[微信] 登录失效提醒推送未成功');
 }
 
 // ---------- 状态 ----------
@@ -372,6 +423,13 @@ async function checkOnce({ initMode = false } = {}) {
       }
 
       // 登录态失效 → 尝试用浏览器 profile 自动恢复
+      if (Date.now() - lastRecoverAt < RECOVER_INTERVAL) {
+        const mins = Math.round((Date.now() - lastRecoverAt) / 60000);
+        log(`上次自动恢复在 ${mins} 分钟前，未满 15 分钟，跳过本轮（不重复启动浏览器）`);
+        return { ok: false };
+      }
+      lastRecoverAt = Date.now();
+
       log('全部院系采集失败，尝试自动恢复登录态...');
       const r = spawnSync(process.execPath, [path.join(DIR, 'browser-session.js'), '--auto'], {
         cwd: DIR,
@@ -384,14 +442,14 @@ async function checkOnce({ initMode = false } = {}) {
         ({ rows: all, errs: errors } = await scanAll());
         if (errors.length === codes.length) {
           log('刷新后仍然失败，可能需要人工登录');
-          notifySessionLost();
+          await notifySessionLost();
           return { ok: false };
         }
         log(`重试成功，采集 ${all.length} 条`);
       } else {
         log('自动恢复失败：浏览器 profile 里也没有有效登录态');
         log('>>> 请双击 setup-login.bat 重新登录一次（只需登录，不用再复制 Cookie）');
-        notifySessionLost();
+        await notifySessionLost();
         return { ok: false };
       }
     }
@@ -435,7 +493,7 @@ async function checkOnce({ initMode = false } = {}) {
         log(res.ok ? '  提交成功' : `  提交失败: ${res.msg}`);
       }
     }
-    notify(fresh, results);
+    await notify(fresh, results);
     fresh.forEach((r) => {
       state.seen[r.BGBM] = { first: new Date().toISOString(), title: r.BGTMZW, dept: r.YXDM_DISPLAY };
     });
@@ -453,6 +511,7 @@ async function checkOnce({ initMode = false } = {}) {
 // ---------- 主流程 ----------
 (async () => {
   const arg = process.argv[2];
+  log('=== 学术报告监控 ' + BUILD + ' ===');
 
   if (arg === '--reset') {
     saveState({ seen: {} });
@@ -485,7 +544,7 @@ async function checkOnce({ initMode = false } = {}) {
 
   if (arg === '--test') {
     log('发送测试通知（假数据，不会写入 state.json）');
-    notify([
+    await notify([
       {
         YXDM: '011',
         BGTMZW: '【测试】这是一条模拟的新报告通知',
@@ -510,6 +569,7 @@ async function checkOnce({ initMode = false } = {}) {
   });
 
   log(`监控启动，间隔 ${config.pollIntervalMinutes} 分钟，白名单 ${Object.keys(config.departments).length} 个院系`);
+  log('构建: ' + BUILD);
   log('提示：请保持此窗口开启，关掉窗口 = 停止监控');
 
   let round = 0;

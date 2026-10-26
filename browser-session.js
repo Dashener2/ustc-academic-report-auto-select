@@ -30,6 +30,14 @@ const LOGIN_TIMEOUT_MS = 300000;
 const args = process.argv.slice(2);
 const AUTO = args.includes('--auto');
 const FORCE_LOGIN = args.includes('--login');
+const RESET = args.includes('--reset');
+
+// --reset：删掉整个 profile 重新来（登录态彻底乱掉时用，比如重定向死循环）
+if (RESET) {
+  try {
+    fs.rmSync(PROFILE, { recursive: true, force: true });
+  } catch (_) {}
+}
 
 function log(msg) {
   const line = `[${new Date().toLocaleTimeString('zh-CN')}] ${msg}`;
@@ -101,6 +109,31 @@ async function seedCookies(page) {
   return n;
 }
 
+/** 清掉所有 ustc 域的 Cookie（解决 ERR_TOO_MANY_REDIRECTS 死循环） */
+async function clearUstcCookies(page) {
+  const client = await page.createCDPSession();
+  try {
+    await client.send('Network.enable');
+  } catch (_) {}
+  let n = 0;
+  try {
+    const { cookies } = await client.send('Network.getAllCookies');
+    for (const c of cookies) {
+      if (/ustc\.edu\.cn/.test(String(c.domain || ''))) {
+        try {
+          await client.send('Network.deleteCookies', {
+            name: c.name,
+            domain: c.domain,
+            path: c.path,
+          });
+          n++;
+        } catch (_) {}
+      }
+    }
+  } catch (_) {}
+  return n;
+}
+
 /** 判断是否已经进入学术报告选课页 */
 async function isModulePage(page) {
   const url = page.url();
@@ -114,12 +147,26 @@ async function isModulePage(page) {
   }
 }
 
+/** 登录成功的判定：进了门户或进了模块页，且不在任何登录页 */
+async function isLoggedInAnywhere(page) {
+  let url = '';
+  try {
+    url = page.url();
+  } catch (_) {
+    return false;
+  }
+  if (/dbLogin|cas\/login|passport\.ustc\.edu\.cn/i.test(url)) return false;
+  if (/yjsemaphome\/portal/.test(url)) return true;
+  if (/xsbgglappustc/.test(url)) return isModulePage(page);
+  return false;
+}
+
 async function waitLogin(page, timeoutMs) {
   const start = Date.now();
   let last = 0;
   while (Date.now() - start < timeoutMs) {
     await new Promise((r) => setTimeout(r, 2000));
-    if (await isModulePage(page)) return true;
+    if (await isLoggedInAnywhere(page)) return true;
     const el = Date.now() - start;
     if (el - last > 20000) {
       last = el;
@@ -164,16 +211,34 @@ async function launch(headless) {
   });
 }
 
-/** 一次静默尝试：灌 Cookie → 打开模块页 → 判断 */
+/**
+ * 一次静默尝试，分两轮：
+ *   第一轮：直接用 profile 里浏览器自己维护的登录态（可能已自动续期，比 cookie.txt 新）
+ *   第二轮：失败才注入 cookie.txt 的 Cookie 再试
+ * 顺序很重要——先注入旧 Cookie 会把 profile 里更新鲜的会话冲掉。
+ */
 async function silentAttempt() {
   let browser;
   try {
     browser = await launch(true);
     const page = (await browser.pages())[0] || (await browser.newPage());
-    const seeded = await seedCookies(page);
-    log(`已注入 ${seeded} 个 Cookie 到浏览器`);
+
+    // ---- 第一轮：profile 现有登录态 ----
+    log('第一轮：使用浏览器 profile 里的现有登录态...');
     await page.goto(MODULE_URL, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
-    await new Promise((r) => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, 2500));
+    if (await isModulePage(page)) {
+      const info = await dumpCookies(page);
+      await browser.close();
+      return { ok: true, ...info, via: 'profile' };
+    }
+    log('   profile 登录态无效');
+
+    // ---- 第二轮：注入 cookie.txt ----
+    const seeded = await seedCookies(page);
+    log(`第二轮：已注入 ${seeded} 个 Cookie，重试...`);
+    await page.goto(MODULE_URL, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 2500));
 
     if (await isModulePage(page)) {
       const info = await dumpCookies(page);
@@ -194,7 +259,7 @@ async function silentAttempt() {
 
 (async () => {
   // 1) 静默尝试
-  if (!FORCE_LOGIN) {
+  if (!FORCE_LOGIN && !RESET) {
     log('静默尝试（注入现有 Cookie，无头模式）...');
     const r = await silentAttempt();
     if (r.ok) {
@@ -214,28 +279,37 @@ async function silentAttempt() {
   try {
     browser = await launch(false);
     const page = (await browser.pages())[0] || (await browser.newPage());
-    await seedCookies(page);
+
+    // 关键：先清掉 ustc 域的旧 Cookie。
+    // 否则"失效但服务器仍认得"的 Cookie 会让 模块↔登录页 之间无限重定向
+    // （浏览器报 ERR_TOO_MANY_REDIRECTS）。
+    const cleared = await clearUstcCookies(page);
+    log(`已清理 ${cleared} 个旧的 ustc Cookie（避免重定向死循环）`);
+
     await page.goto(CAS_ENTRY, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
     await new Promise((r) => setTimeout(r, 2500));
 
-    // 进了门户说明 Cookie 够用，直接去模块页
+    // 进了门户说明登录态够用
     let url = '';
     try { url = page.url(); } catch (_) {}
     if (/yjsemaphome\/portal/.test(url)) {
-      log('已直接进入门户（Cookie 有效），前往模块页...');
+      log('已直接进入门户（登录态有效），前往模块页...');
     } else {
       log('====================================================');
       log('  请在弹出的 Chrome 窗口里完成统一身份认证登录');
       log('  （学号密码 或 微信扫码，和你平时一样）');
       log(`  最多等待 ${LOGIN_TIMEOUT_MS / 60000} 分钟，登录成功会自动保存`);
+      log('  ⚠️ 登录完不要手动关窗口，脚本会自动检测');
       log('====================================================');
-      await page.goto(MODULE_URL, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+      // 不要在这里主动跳转——会把你正在登录的 CAS 页面顶掉，
+      // 登录成功后 CAS 自己会跳回门户。
       const ok = await waitLogin(page, LOGIN_TIMEOUT_MS);
       if (!ok) {
         log('❌ 超时未检测到登录成功');
         await browser.close();
         process.exit(1);
       }
+      log('检测到登录成功，正在进入模块页...');
     }
 
     await page.goto(MODULE_URL, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
