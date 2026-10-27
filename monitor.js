@@ -339,7 +339,7 @@ let lastRecoverAt = 0;
 async function notifySessionLost() {
   const n = config.notify || {};
   const text =
-    '登录态已失效，监控已停止选课。\n\n请回到电脑，双击 setup-login.bat 重新登录一次\n（在弹出的 Chrome 窗口里登录，不用复制 Cookie）';
+    '登录态已失效，监控已停止选课。\n\n请回到电脑，双击 login-manual.bat 重新登录一次\n（在弹出的 Chrome 窗口里登录，不用复制 Cookie）';
 
   const throttled = Date.now() - lastSessionNotifyAt < SESSION_NOTIFY_INTERVAL;
   if (throttled) {
@@ -448,7 +448,7 @@ async function checkOnce({ initMode = false } = {}) {
         log(`重试成功，采集 ${all.length} 条`);
       } else {
         log('自动恢复失败：浏览器 profile 里也没有有效登录态');
-        log('>>> 请双击 setup-login.bat 重新登录一次（只需登录，不用再复制 Cookie）');
+        log('>>> 请双击 login-manual.bat 重新登录一次（只需登录，不用再复制 Cookie）');
         await notifySessionLost();
         return { ok: false };
       }

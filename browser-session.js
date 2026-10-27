@@ -31,6 +31,8 @@ const args = process.argv.slice(2);
 const AUTO = args.includes('--auto');
 const FORCE_LOGIN = args.includes('--login');
 const RESET = args.includes('--reset');
+const MANUAL = args.includes('--manual');
+const DEBUG = process.env.BS_DEBUG === '1';
 
 // --reset：删掉整个 profile 重新来（登录态彻底乱掉时用，比如重定向死循环）
 if (RESET) {
@@ -38,6 +40,16 @@ if (RESET) {
     fs.rmSync(PROFILE, { recursive: true, force: true });
   } catch (_) {}
 }
+
+process.on('uncaughtException', (e) => {
+  log('❌ 未捕获异常: ' + (e && e.stack ? e.stack.split('\n')[0] : String(e)));
+  try { console.log(e && e.stack ? e.stack : e); } catch (_) {}
+  process.exit(1);
+});
+process.on('unhandledRejection', (e) => {
+  log('❌ 未处理的 Promise 拒绝: ' + (e && e.stack ? e.stack.split('\n')[0] : String(e)));
+  try { console.log(e && e.stack ? e.stack : e); } catch (_) {}
+});
 
 function log(msg) {
   const line = `[${new Date().toLocaleTimeString('zh-CN')}] ${msg}`;
@@ -166,6 +178,12 @@ async function waitLogin(page, timeoutMs) {
   let last = 0;
   while (Date.now() - start < timeoutMs) {
     await new Promise((r) => setTimeout(r, 2000));
+    try {
+      if (page.isClosed && page.isClosed()) {
+        log('❌ Chrome 窗口已关闭，登录中断');
+        return false;
+      }
+    } catch (_) {}
     if (await isLoggedInAnywhere(page)) return true;
     const el = Date.now() - start;
     if (el - last > 20000) {
@@ -200,6 +218,7 @@ async function launch(headless) {
   return puppeteer.launch({
     executablePath: chrome,
     headless,
+    dumpio: DEBUG,
     userDataDir: PROFILE,
     args: [
       '--no-first-run',
@@ -257,7 +276,178 @@ async function silentAttempt() {
   }
 }
 
+function prompt(question) {
+  return new Promise((resolve) => {
+    const rl = require('readline').createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(question, (ans) => {
+      rl.close();
+      resolve(ans);
+    });
+  });
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/** 连上已经在跑的 Chrome（通过调试端口），从内存里导出 Cookie —— 关键是不能等它关闭 */
+async function exportFromDebugPort(port) {
+  const browser = await puppeteer.connect({ browserURL: 'http://127.0.0.1:' + port, defaultViewport: null });
+  try {
+    const pages = await browser.pages();
+    const page = pages.find((p) => /yjs1\.ustc\.edu\.cn/.test(p.url())) || pages[0];
+    if (!page) throw new Error('没有可用页面');
+    const url = page.url();
+    log('  当前页面: ' + url.slice(0, 110));
+    if (/dbLogin|cas\/login|passport\.ustc\.edu\.cn/i.test(url)) {
+      throw new Error('页面还停在登录页，请先在 Chrome 里完成登录再按回车');
+    }
+    const info = await dumpCookies(page);
+    return { ok: true, ...info, url };
+  } finally {
+    try {
+      await browser.disconnect();
+    } catch (_) {}
+  }
+}
+
+/** 用导出的 Cookie 立刻打一次接口，确认真的能用 */
+function verifyCookie(cookieStr) {
+  const https = require('https');
+  return new Promise((resolve) => {
+    const body = '*json=1&pageSize=1&pageNumber=1&YXDM=210';
+    const req = https.request(
+      {
+        hostname: 'yjs1.ustc.edu.cn',
+        port: 443,
+        path: '/gsapp/sys/xsbgglappustc/modules/xsbgxk/wxbgbgdz.do',
+        method: 'POST',
+        headers: {
+          accept: 'application/json, text/javascript, */*; q=0.01',
+          'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          'x-requested-with': 'XMLHttpRequest',
+          origin: 'https://yjs1.ustc.edu.cn',
+          referer: 'https://yjs1.ustc.edu.cn/gsapp/sys/xsbgglappustc/*default/index.do',
+          'user-agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36',
+          cookie: cookieStr,
+          'content-length': Buffer.byteLength(body),
+        },
+      },
+      (res) => {
+        const c = [];
+        res.on('data', (x) => c.push(x));
+        res.on('end', () => {
+          const t = Buffer.concat(c).toString('utf8');
+          let total = null;
+          try {
+            const j = JSON.parse(t);
+            if (j.datas && j.datas.wxbgbgdz) total = j.datas.wxbgbgdz.totalSize;
+          } catch (_) {}
+          resolve({ ok: res.statusCode === 200 && total != null, status: res.statusCode, total });
+        });
+      }
+    );
+    req.setTimeout(20000, () => req.destroy(new Error('timeout')));
+    req.on('error', (e) => resolve({ ok: false, msg: e.message }));
+    req.write(body);
+    req.end();
+  });
+}
+
+/**
+ * 手动模式：绕过 puppeteer 的有头启动（部分 Chrome 版本会闪退），
+ * 但通过 --remote-debugging-port 连进去，在**浏览器仍然打开**时导出 Cookie。
+ * 这一点很关键：会话级 Cookie 在 Chrome 关闭时会被销毁。
+ */
+async function manualFlow() {
+  if (RESET) {
+    try {
+      fs.rmSync(PROFILE, { recursive: true, force: true });
+    } catch (_) {}
+  }
+  const chrome = findChrome();
+  if (!chrome) {
+    log('❌ 没找到 Chrome/Edge');
+    return process.exit(1);
+  }
+  const { spawn } = require('child_process');
+  fs.mkdirSync(PROFILE, { recursive: true });
+
+  let port = 9222;
+  for (let i = 0; i < 5; i++) {
+    const p = 9222 + i;
+    const inUse = await new Promise((resolve) => {
+      const https = require('http');
+      const rq = https.request({ hostname: '127.0.0.1', port: p, path: '/json/version', method: 'GET' }, () => resolve(true));
+      rq.setTimeout(800, () => rq.destroy());
+      rq.on('error', () => resolve(false));
+      rq.end();
+    });
+    if (!inUse) {
+      port = p;
+      break;
+    }
+  }
+
+  log('正在用普通方式打开 Chrome 窗口（不经过自动化控制）...');
+  log('调试端口: ' + port);
+  spawn(
+    chrome,
+    [
+      '--user-data-dir=' + PROFILE,
+      '--remote-debugging-port=' + port,
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--window-size=1280,900',
+      CAS_ENTRY,
+    ],
+    { detached: true, stdio: 'ignore' }
+  ).unref();
+
+  log('====================================================');
+  log('  1. 在弹出的 Chrome 里完成登录（学号密码 / 微信扫码）');
+  log('  2. 确认能看到门户或课程页面');
+  log('  3. ⚠️ 不要关闭这个 Chrome 窗口！直接回到这里按回车');
+  log('     （关闭窗口会销毁会话 Cookie，导致导入失败）');
+  log('====================================================');
+  await prompt('登录完成并停在门户页后，按回车 > ');
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    log('第 ' + attempt + ' 次尝试连接 Chrome 导出 Cookie...');
+    try {
+      const r = await exportFromDebugPort(port);
+      if (!r.ok) throw new Error(r.reason || '导出失败');
+      log('✅ 已导出 ' + r.count + ' 个 Cookie（' + r.bytes + ' 字节）');
+
+      const raw = fs.readFileSync(COOKIE_FILE, 'utf8').trim();
+      log('正在用这份 Cookie 实测接口...');
+      const v = await verifyCookie(raw);
+      if (v.ok) {
+        log('✅ 接口验证通过，采集到 ' + v.total + ' 条记录');
+        log('✅ 登录态已就绪，现在可以关闭那个 Chrome 窗口了');
+        process.exit(0);
+      }
+      log('❌ 接口验证失败 HTTP ' + v.status + '，Cookie 可能不完整');
+    } catch (e) {
+      log('❌ ' + e.message);
+    }
+    if (attempt < 3) {
+      await sleep(3000);
+      await prompt('请确认 Chrome 已登录并停在门户页，然后按回车重试 > ');
+    }
+  }
+  log('❌ 三次尝试均失败');
+  process.exit(1);
+}
+
 (async () => {
+  // 手动模式：完全绕过 puppeteer 的有头启动
+  if (MANUAL) {
+    await manualFlow();
+    return;
+  }
+
   // 1) 静默尝试
   if (!FORCE_LOGIN && !RESET) {
     log('静默尝试（注入现有 Cookie，无头模式）...');
@@ -278,7 +468,10 @@ async function silentAttempt() {
   let browser;
   try {
     browser = await launch(false);
+    browser.on('disconnected', () => log('⚠️ 浏览器连接断开（Chrome 窗口被关闭或进程退出）'));
     const page = (await browser.pages())[0] || (await browser.newPage());
+    page.on('error', (e) => log('⚠️ 页面崩溃: ' + e.message));
+    page.on('close', () => log('⚠️ 页面已关闭'));
 
     // 关键：先清掉 ustc 域的旧 Cookie。
     // 否则"失效但服务器仍认得"的 Cookie 会让 模块↔登录页 之间无限重定向

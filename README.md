@@ -67,7 +67,7 @@ npm install
 
 1. **登录授权**（只需一次）
    ```
-   双击 setup-login.bat
+   双击 login-manual.bat
    ```
    会先静默尝试用已有登录态进站；失败才弹出 Chrome 让你走统一身份认证登录。
 
@@ -200,10 +200,10 @@ ustc-monitor/
 
 **Q：为什么过几天就要重新登录？**
 
-学校会话有服务器端的绝对有效期（实测约 5 天），本地怎么续期都绕不过。到期后监控会弹窗并推微信提醒，双击 `setup-login.bat` 花 30 秒重登即可。
+学校会话有服务器端的绝对有效期（实测约 5 天），本地怎么续期都绕不过。到期后监控会弹窗并推微信提醒，双击 `login-manual.bat` 花 30 秒重登即可。
 
 **Q：Cookie 一直失效？**
-删掉 `.chrome-profile` 目录，重新跑 `setup-login.bat` 完整登录一次。
+删掉 `.chrome-profile` 目录，重新跑 `login-manual.bat` 完整登录一次。
 
 ---
 
